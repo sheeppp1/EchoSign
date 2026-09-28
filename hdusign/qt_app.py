@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QUrl, Qt, qInstallMessageHandler
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -86,6 +86,14 @@ class Icons(QQuickImageProvider):
             painter.drawArc(QRectF(4, 4, 16, 16), -45 * 16, 290 * 16)
             line([(3, 3), (3, 9), (9, 9)])
             line([(12, 7), (12, 12), (16, 14)])
+        elif name == "refresh":
+            painter.drawArc(QRectF(4, 4, 16, 16), 30 * 16, 300 * 16)
+            line([(20, 4), (20, 9), (15, 9)])
+        elif name == "page":
+            line([(6, 3), (14, 3), (19, 8), (19, 21), (6, 21), (6, 3)])
+            line([(14, 3), (14, 8), (19, 8)])
+            line([(9, 13), (16, 13)])
+            line([(9, 17), (14, 17)])
         elif name == "camera":
             painter.drawRoundedRect(QRectF(3, 6, 12, 12), 2, 2)
             line([(15, 9), (21, 6), (21, 18), (15, 15)])
@@ -127,11 +135,22 @@ def create_engine(controller, app=None):
     qInstallMessageHandler(forward_message)
     if QQuickStyle.name() != "Basic":
         QQuickStyle.setStyle("Basic")
-    # Generic families are resolved by the platform font backend. Explicitly
-    # probing Qt's removed bundled-font directory emits a warning on PySide6.
-    body = "sans-serif"
+    # Load a known system font without enumerating Qt's removed bundled-font
+    # directory. This keeps Chinese glyphs available in the desktop build and
+    # avoids the QFontDatabase warning emitted by PySide6's empty font folder.
+    body = "Microsoft YaHei UI"
+    for candidate in ("C:/Windows/Fonts/Noto Sans SC (TrueType).otf",
+                      "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simsun.ttc"):
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if families:
+            body = families[0]
+            break
     heading = body
-    mono = "monospace"
+    mono = "Cascadia Mono"
     app.setFont(QFont(body, 10))
     engine = QQmlApplicationEngine()
     load_errors = []

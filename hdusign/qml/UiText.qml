@@ -3,7 +3,7 @@ import QtQuick
 Text {
     color: Theme.text
     font.family: Theme.body
-    font.pixelSize: 13
+    font.pixelSize: 14
     renderType: Text.QtRendering
     textFormat: Text.PlainText
     verticalAlignment: Text.AlignVCenter

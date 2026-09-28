@@ -1,5 +1,6 @@
 """Render the actual QML and exercise input with isolated demo services."""
 from pathlib import Path
+from dataclasses import replace
 import tempfile
 import unittest
 
@@ -60,10 +61,12 @@ class QmlDesktopTests(unittest.TestCase):
         self.c.consume(['[ASR 00:00:01] 简短转写。'])
         QTest.qWait(30)
         self.assertAlmostEqual(quote.height(), initial)
-        for width in (960, 1400):
+        for width in (960, 1400, 1500):
             self.window.setWidth(width)
             QTest.qWait(40)
-            self.assertLessEqual(self.item('document').width(), 840)
+            self.assertLessEqual(self.item('document').width(), 1120)
+            if width == 1400:
+                self.assertGreater(self.item('document').width(), 760)
             card, button = self.item('codeCard'), self.item('copyButton')
             self.assertLess(button.mapToItem(card, QPointF(button.width(), 0)).x(), card.width())
 
@@ -76,6 +79,14 @@ class QmlDesktopTests(unittest.TestCase):
         self.click('activityToggle')
         self.assertTrue(self.window.property('activityExpanded'))
         self.assertIsNotNone(self.item('logList'))
+        scroll = self.item('documentScroll')
+        scroll.setProperty('contentY', scroll.property('contentHeight') - scroll.property('height'))
+        QTest.qWait(50)
+        follow = self.item('followToggle')
+        self.assertTrue(follow.property('checked'))
+        self.click('followToggle')
+        self.assertFalse(self.window.property('followLogs'))
+        self.assertFalse(follow.property('checked'))
         self.click('activityToggle')
         self.assertFalse(self.window.property('activityExpanded'))
         self.assertIsNone(self.window.findChild(QObject, 'logList'))
@@ -125,9 +136,70 @@ class QmlDesktopTests(unittest.TestCase):
         self.assertIsNotNone(self.item('navLive'))
         self.assertIsNotNone(self.item('monitorButton'))
 
-    def test_window_identity_and_course_hover_are_not_exposed(self):
+    def test_course_page_title_and_breadcrumb_follow_selection(self):
         self.assertEqual(self.window.property('title'), '')
-        self.assertEqual(self.item('pageBreadcrumb').property('text'), '课堂监控')
+        self.assertEqual(self.item('pageBreadcrumb').property('text'), '计算机网络')
+        self.assertEqual(self.item('pageTitle').property('text'), '计算机网络')
+        self.assertEqual(self.item('courseLibraryHeading').property('text'), '课程库')
+        self.assertIn('王老师', self.item('pageSubtitle').property('text'))
+        self.assertIsNone(self.window.findChild(QObject, 'accountMenu'))
+        self.c.selectCourse(self.c.course_model.items[1]['url'])
+        QTest.qWait(30)
+        self.assertEqual(self.item('pageTitle').property('text'), '数据库原理')
+        self.assertEqual(self.item('pageBreadcrumb').property('text'), '数据库原理')
+        self.assertIn('李老师', self.item('pageSubtitle').property('text'))
+        self.assertEqual(self.item('monitorButton').property('text'), '预约直播')
+        self.c.setField('live', False)
+        QTest.qWait(30)
+        self.assertEqual(self.item('pageTitle').property('text'), '电脑声音')
+
+    def test_settings_and_course_page_share_alignment_at_supported_widths(self):
+        self.c.set_courses([replace(self.c._courses[0], title='计算机网络与分布式系统：课程实验及教学研讨')])
+        for width in (960, 1180, 1500):
+            self.window.setWidth(width)
+            self.click('navSettings')
+            settings = self.item('settingsDocument')
+            course = self.item('document')
+            self.assertAlmostEqual(settings.width(), course.width())
+            self.assertAlmostEqual(settings.mapToScene(QPointF()).x(), course.mapToScene(QPointF()).x())
+            self.click('navLive')
+            self.assertLess(self.item('courseList').property('contentHeight'), 100)
+            button = self.item('monitorButton')
+            title = self.item('pageTitle')
+            self.assertLess(title.mapToScene(QPointF(title.width(), 0)).x(), button.mapToScene(QPointF()).x())
+            self.assertLessEqual(button.mapToScene(QPointF(button.width(), 0)).x(), self.window.width() - 24)
+
+    def test_empty_courses_and_failed_load_show_distinct_recoverable_states(self):
+        self.c.setField('url', '')
+        self.c.set_courses([])
+        QTest.qWait(30)
+        self.assertEqual(self.item('courseNoticeTitle').property('text'), '今明暂无直播课程')
+        self.assertFalse(self.item('monitorButton').isEnabled())
+        self.assertEqual(self.item('codeValue').property('text'), '等待识别')
+        self.assertFalse(self.item('copyButton').isEnabled())
+        self.c._publish(courseLoadState='error', courseError='课程暂时不可用')
+        QTest.qWait(30)
+        self.assertEqual(self.item('courseNoticeTitle').property('text'), '课程加载失败')
+        self.click('retryCoursesButton')
+        for _ in range(50):
+            if not self.c._task:
+                break
+            QTest.qWait(20)
+        self.assertEqual(self.c._state['courseLoadState'], 'ready')
+        self.assertEqual(self.c._state['courseError'], '')
+        self.assertEqual(self.item('courseNoticeTitle').property('text'), '选择一节课程')
+
+    def test_stop_action_remains_reachable_from_settings(self):
+        self.click('monitorButton')
+        self.click('navSettings')
+        self.assertTrue(self.item('ongoingAction').isVisible())
+        self.click('ongoingAction')
+        for _ in range(50):
+            if not self.c._task:
+                break
+            QTest.qWait(20)
+        self.assertFalse(self.c._state['monitoring'])
+        self.assertFalse(self.item('ongoingAction').isVisible())
 
     def test_monitor_stop_and_close_complete_without_blocking_window(self):
         self.click('monitorButton')

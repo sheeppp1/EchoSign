@@ -163,7 +163,9 @@ class Controller(QObject):
                            transcript="等待开始", transcriptHint="选择课程后开始监控。",
                            transcriptFinal=False, code="", feedback="", errorField="",
                            feedbackError=False, courseHint="登录后读取今明直播课。",
-                           selectedUrl="", actionText="开始监控", actionIcon="play",
+                           selectedUrl="", courseTitle="", courseSubtitle="",
+                           courseLoadState="unloaded", courseError="",
+                           actionText="开始监控", actionIcon="play",
                            destructive=False, busy=False, monitoring=False, stopping=False,
                            closing=False, needsLogin=False, copied=False, scheduled=False,
                            locationHint="核对坐标后保存。", dirty=False)
@@ -253,6 +255,8 @@ class Controller(QObject):
         return self.activity_model
 
     def _publish(self, **values):
+        if "selectedUrl" in values:
+            values.update(self._course_details(values["selectedUrl"]))
         changed = {key: value for key, value in values.items() if self._state.get(key) != value}
         if changed:
             self._state.update(changed)
@@ -288,7 +292,8 @@ class Controller(QObject):
             self.course_model.reset()
             if self._form["live"]:
                 self._form["url"] = ""
-            self._publish(needsLogin=True, selectedUrl="", courseHint="账号已修改，请登录并读取课程。")
+            self._publish(needsLogin=True, selectedUrl="", courseLoadState="unloaded", courseError="",
+                          courseHint="账号已修改，请登录并读取课程。")
         elif key == "url":
             self._publish(selectedUrl=value.strip())
         self.formChanged.emit()
@@ -358,10 +363,23 @@ class Controller(QObject):
                     active=phase == "进行中", start=course.start, end=course.end,
                     fullTime=f"{start:%m-%d %H:%M}–{end:%H:%M}")
 
+    def _course_details(self, url):
+        course = next((c for c in getattr(self, "_courses", ()) if live_course_url(c) == url), None)
+        scheduled = getattr(self, "_scheduled", None)
+        if course is None and scheduled and live_course_url(scheduled) == url:
+            course = scheduled
+        if course is None:
+            return dict(courseTitle="", courseSubtitle="")
+        row = self._course_row(course)
+        return dict(courseTitle=course.title, courseSubtitle=" · ".join(
+            filter(None, (row["fullTime"], course.teacher, row["detail"]))))
+
     def set_courses(self, courses):
         self._courses = list(courses or [])[:self.course_model.limit]
         self.course_model.reset(self._course_row(c) for c in self._courses)
-        self._publish(courseHint=f"找到 {len(self._courses)} 节今明直播课，选择后可监控或预约。" if self._courses
+        self._publish(**self._course_details(self._state["selectedUrl"]),
+                      courseLoadState="ready" if self._courses else "empty", courseError="",
+                      courseHint=f"找到 {len(self._courses)} 节今明直播课，选择后可监控或预约。" if self._courses
                       else "今明没有可选择的直播课，可刷新或在设置中填写网址。")
         self._action()
 
@@ -407,7 +425,7 @@ class Controller(QObject):
         if self._state["needsLogin"]:
             self._feedback("请先登录并读取课程", True, "username")
             return
-        self._publish(courseHint="正在读取直播课程…")
+        self._publish(courseLoadState="loading", courseError="", courseHint="正在读取直播课程…")
         self._courses = []
         self.course_model.reset()
         cfg = copy.deepcopy(self.cfg)
@@ -435,7 +453,8 @@ class Controller(QObject):
         self.course_model.reset()
         self._form["url"] = ""
         self.formChanged.emit()
-        self._publish(needsLogin=True, selectedUrl="", courseHint="正在登录，需要验证码时请在浏览器中完成。")
+        self._publish(needsLogin=True, selectedUrl="", courseLoadState="loading", courseError="",
+                      courseHint="正在登录，需要验证码时请在浏览器中完成。")
         self._run("login", lambda: self.services.login(url, self.stop_event, credentials, manual))
 
     def _action(self):
@@ -629,7 +648,9 @@ class Controller(QObject):
         if kind == "monitor":
             self._update_elapsed()
             self._started = None
-        self._publish(stopping=False, status="任务异常" if failed else "已停止" if kind == "monitor" else "就绪",
+        failure_status = dict(monitor="监控异常", courses="课程加载失败", login="登录未完成",
+                              signin="签到登录失败", locate="定位失败", webhook="通知失败")
+        self._publish(stopping=False, status=failure_status.get(kind, "任务异常") if failed else "已停止" if kind == "monitor" else "就绪",
                       statusKind="error" if failed else "idle")
         self._action()
         if self._state["closing"]:
@@ -639,12 +660,14 @@ class Controller(QObject):
             self._publish(transcriptHint="请查看活动记录后重试。" if failed else "监控已停止，可选择课程开始下一次监控。")
         elif kind == "courses":
             if failed:
-                self._publish(courseHint=str(result) if isinstance(result, LiveError) else "读取课程失败，请登录或稍后刷新。")
+                message = str(result) if isinstance(result, LiveError) else "读取课程失败，请检查网络后重试。"
+                self._publish(courseLoadState="error", courseError=message, courseHint=message)
             else:
                 self.set_courses(result)
         elif kind == "login":
             ok = not failed and result == 0
-            self._publish(needsLogin=not ok, courseHint="登录成功，正在读取课程…" if ok else "登录未完成，请核对账号或完成浏览器验证。")
+            self._publish(needsLogin=not ok, courseLoadState="loading" if ok else "unloaded",
+                          courseHint="登录成功，正在读取课程…" if ok else "登录未完成，请核对账号或完成浏览器验证。")
             if ok:
                 self.navigateCourses.emit()
                 self.refreshCourses()

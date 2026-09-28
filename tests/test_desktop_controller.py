@@ -15,7 +15,7 @@ from PySide6.QtTest import QSignalSpy
 
 from hdusign.desktop_controller import Controller, Rows
 from hdusign.demo import DemoServices, demo_courses, prepare_demo
-from hdusign.live import live_course_url
+from hdusign.live import LiveError, live_course_url
 from hdusign.location import Location
 
 
@@ -134,6 +134,8 @@ class DesktopControllerTests(unittest.TestCase):
         other.shutdown()
         self.assertEqual(other._scheduled, course)
         self.assertEqual(other.form.value('url'), live_course_url(course))
+        self.assertEqual(other.state.value('courseTitle'), course.title)
+        self.assertIn(course.teacher, other.state.value('courseSubtitle'))
         self.c.setField('username', 'changed')
         self.assertIsNone(self.c._scheduled)
         self.assertNotIn('scheduled_course', yaml.safe_load(self.c.config_path.read_text(encoding='utf-8')))
@@ -235,6 +237,28 @@ class DesktopControllerTests(unittest.TestCase):
         self.c.set_courses(demo_courses() * 10)
         self.c.tick()
         self.assertEqual(len(self.c._courses), 2)
+
+    def test_course_failure_empty_result_and_retry_have_distinct_states(self):
+        def denied(cfg, stop):
+            raise LiveError('当前账号无权读取直播课程。')
+        self.c.services.courses = denied
+        self.c.refreshCourses()
+        self.assertEqual(self.c._state['courseLoadState'], 'loading')
+        self.complete()
+        self.assertEqual(self.c._state['status'], '课程加载失败')
+        self.assertEqual(self.c._state['courseLoadState'], 'error')
+        self.assertEqual(self.c._state['courseError'], '当前账号无权读取直播课程。')
+        self.c.services.courses = lambda *args: []
+        self.c.refreshCourses()
+        self.complete()
+        self.assertEqual(self.c._state['courseLoadState'], 'empty')
+        self.assertEqual(self.c._state['courseError'], '')
+        self.assertEqual(self.c._state['status'], '就绪')
+        self.c.services.courses = DemoServices().courses
+        self.c.refreshCourses()
+        self.complete()
+        self.assertEqual(self.c._state['courseLoadState'], 'ready')
+        self.assertEqual(self.c.course_model.count, 2)
 
 
 if __name__ == '__main__':

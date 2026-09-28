@@ -17,13 +17,31 @@ ApplicationWindow {
     property bool settingsVisible: false
     property bool activityExpanded: false
     property bool followLogs: true
+    readonly property real pageMargin: main.width < 800 ? 32 : 48
+    readonly property real pageWidth: Math.min(1120, main.width - pageMargin * 2)
+    readonly property string coursePageTitle: !appController.form.live ? "电脑声音" : appController.state.courseTitle || (appController.state.selectedUrl ? "直播课堂" : "课堂监控")
+    readonly property bool courseProblem: appController.state.courseLoadState === "error"
+    readonly property bool showCourseNotice: appController.form.live && !appController.state.monitoring && !appController.state.scheduled && (courseProblem || appController.state.needsLogin || !appController.state.selectedUrl)
+    readonly property string courseNoticeTitle: appController.state.busy ? appController.state.status
+        : courseProblem ? "课程加载失败" : appController.state.needsLogin ? "请登录直播账号"
+        : appController.state.courseLoadState === "empty" ? "今明暂无直播课程"
+        : appController.courses.count > 0 ? "选择一节课程" : "读取你的直播课程"
+    readonly property string courseNoticeHint: courseProblem ? appController.state.courseError
+        : appController.state.needsLogin || appController.state.busy ? appController.state.courseHint
+        : appController.courses.count > 0 ? "从左侧课程库选择课程，开始监控或预约。"
+        : appController.state.courseLoadState === "empty" ? "可稍后刷新，也可在设置中填写课程网址。"
+        : "读取今明课程；首次使用请先在设置中登录账号。"
+    readonly property bool monitorEnabled: !appController.state.closing && !appController.state.stopping
+        && (!appController.state.busy || appController.state.monitoring)
+        && (appController.state.destructive || !appController.form.live || (!!appController.state.selectedUrl && !appController.state.needsLogin))
     onClosing: function(event) { event.accepted = appController.requestClose() }
     Shortcut { sequence: "Ctrl+S"; onActivated: appController.save() }
     Shortcut { sequence: "Ctrl+Shift+L"; onActivated: appController.toggleTheme() }
+    Shortcut { sequence: "Ctrl+\\"; onActivated: window.collapsed = !window.collapsed }
     Connections {
         target: appController
         function onNavigateSettings(key) { window.settingsVisible = true; window.collapsed = false }
-        function onNavigateCourses() { window.settingsVisible = false; window.collapsed = false }
+        function onNavigateCourses() { window.settingsVisible = false; window.collapsed = false; documentScroll.contentY = 0 }
     }
 
     Rectangle {
@@ -33,44 +51,51 @@ ApplicationWindow {
         color: Theme.sidebar
         Column {
             id: navigation
-            x: 8; y: 8; width: parent.width - 16; spacing: 4
-            UiButton {
-                anchors.right: parent.right; width: 28; height: 28
-                iconName: window.collapsed ? "expand" : "collapse"
-                tooltip: window.collapsed ? "展开侧栏" : "收起侧栏"
-                onClicked: window.collapsed = !window.collapsed
+            x: 8; y: 6; width: parent.width - 16; spacing: 2
+            // Workspace identity stays separate from the sidebar control.
+            Item {
+                width: parent.width; height: window.collapsed ? 72 : 36
+                Item {
+                    id: workspaceIdentity
+                    y: window.collapsed ? 36 : 0
+                    width: window.collapsed ? parent.width : parent.width - 32; height: 36
+                    Row {
+                        x: window.collapsed ? (parent.width - 22) / 2 : 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 8
+                        Rectangle {
+                            width: 22; height: 22; radius: 4; color: Theme.selected
+                            anchors.verticalCenter: parent.verticalCenter
+                            UiText { anchors.centerIn: parent; text: appController.form.username.slice(0, 1) || "·"; font.pixelSize: 12; font.weight: Font.DemiBold; color: Theme.muted }
+                        }
+                        UiText {
+                            visible: !window.collapsed; width: Math.min(implicitWidth, workspaceIdentity.width - 24)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: appController.form.username || "登录账号"
+                            font.pixelSize: 14; font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+                UiButton {
+                    x: window.collapsed ? (parent.width - width) / 2 : parent.width - width; y: 4
+                    width: 28; height: 28
+                    iconName: window.collapsed ? "expand" : "collapse"
+                    tooltip: window.collapsed ? "展开侧栏 (Ctrl+\\)" : "收起侧栏 (Ctrl+\\)"
+                    onClicked: window.collapsed = !window.collapsed
+                }
             }
-            UiButton {
-                id: accountButton
-                width: parent.width; height: 36; alignLeft: true
-                tooltip: "账号菜单"; onClicked: accountMenu.open()
-                contentItem: Row {
-                    spacing: 8
-                    Rectangle {
-                        width: 22; height: 22; radius: 4; color: Theme.selected
-                        anchors.verticalCenter: parent.verticalCenter
-                        UiText { anchors.centerIn: parent; text: appController.form.username.slice(0, 1) || "·"; font.pixelSize: 11; color: Theme.muted }
-                    }
-                    UiText {
-                        visible: !window.collapsed; width: accountButton.width - 58
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: appController.form.username || "登录账号"
-                        elide: Text.ElideRight
-                    }
-                    Icon { visible: !window.collapsed; name: "chevron"; width: 12; anchors.verticalCenter: parent.verticalCenter }
-                }
-                Popup {
-                    id: accountMenu
-                    y: accountButton.height + 4; width: 208; padding: 4
-                    background: Rectangle { color: Theme.surface; radius: 4; border.width: 1; border.color: Theme.border }
-                    contentItem: Column {
-                        UiButton { width: parent.width; text: "账号设置"; alignLeft: true; onClicked: { accountMenu.close(); window.collapsed = false; window.settingsVisible = true } }
-                    }
-                }
+            Item { width: 1; height: 6 }
+                UiText {
+                    visible: !window.collapsed
+                    width: parent.width; height: 26; leftPadding: 10
+                    text: "工作区"; color: Theme.subtle
+                    font.pixelSize: 12; font.weight: Font.Medium
             }
             UiButton {
                 objectName: "navLive"
-                width: parent.width; text: window.collapsed ? "" : "直播"; iconName: "camera"
+                width: parent.width; height: 34; text: window.collapsed ? "" : "直播"; iconName: "camera"
+                fontPixelSize: 15
                 selected: !window.settingsVisible; alignLeft: !window.collapsed
                 ink: selected ? Theme.text : Theme.muted
                 tooltip: window.collapsed ? "直播" : ""
@@ -78,7 +103,8 @@ ApplicationWindow {
             }
             UiButton {
                 objectName: "navSettings"
-                width: parent.width; text: window.collapsed ? "" : "设置"; iconName: "settings"
+                width: parent.width; height: 34; text: window.collapsed ? "" : "设置"; iconName: "settings"
+                fontPixelSize: 15
                 selected: window.settingsVisible; alignLeft: !window.collapsed
                 ink: selected ? Theme.text : Theme.muted
                 tooltip: window.collapsed ? "设置" : ""
@@ -86,76 +112,82 @@ ApplicationWindow {
             }
         }
         Item {
-            anchors.top: navigation.bottom; anchors.topMargin: 20
-            anchors.bottom: actions.top; width: parent.width
+            anchors.top: navigation.bottom; anchors.topMargin: 18
+            anchors.bottom: actions.top; anchors.bottomMargin: 12
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.leftMargin: 8; anchors.rightMargin: 8
             visible: !window.collapsed
             Column {
                 id: coursesPanel
-                anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16
-                spacing: 8; visible: !window.settingsVisible
+                anchors.fill: parent
+                spacing: 2
                 Item {
-                    width: parent.width; height: 28
-                    UiText { text: "今明直播课"; color: Theme.muted; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
-                    UiButton { text: "刷新"; width: 40; height: 26; anchors.right: parent.right; enabled: !appController.state.busy; onClicked: appController.refreshCourses() }
+                    width: parent.width; height: 26
+                    UiText { objectName: "courseLibraryHeading"; leftPadding: 10; text: "课程库"; color: Theme.subtle; font.pixelSize: 12; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                    UiButton { iconName: "refresh"; width: 24; height: 24; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; tooltip: "刷新课程"; enabled: !appController.state.busy; onClicked: appController.refreshCourses() }
                 }
                 ListView {
                     id: courseList
                     objectName: "courseList"
                     width: parent.width
-                    height: Math.min(contentHeight, Math.max(100, coursesPanel.height - courseHint.implicitHeight - 60))
-                    clip: true; reuseItems: true; spacing: 6
+                    height: Math.min(contentHeight, Math.max(100, coursesPanel.height - 40))
+                    clip: true; reuseItems: true; spacing: 2
                     model: appController.courses
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                     delegate: ItemDelegate {
                         id: courseDelegate
                         required property var entry
+                        readonly property bool current: appController.state.selectedUrl === entry.url
                         width: courseList.width
-                        height: courseContent.implicitHeight + 20
-                        padding: 10
+                        height: courseContent.implicitHeight + 12
+                        leftPadding: 10; rightPadding: 8; topPadding: 6; bottomPadding: 6
                         enabled: !appController.state.busy
                         hoverEnabled: true
-                        onClicked: appController.selectCourse(entry.url)
+                        onClicked: { appController.selectCourse(entry.url); window.settingsVisible = false; documentScroll.contentY = 0 }
                         background: Rectangle {
                             radius: 4
-                            color: appController.state.selectedUrl === courseDelegate.entry.url ? Theme.selected : courseDelegate.hovered ? Theme.hover : "transparent"
+                            color: courseDelegate.current ? Theme.selected : courseDelegate.hovered ? Theme.hover : "transparent"
                         }
                         contentItem: Column {
                             id: courseContent
-                            spacing: 4
+                            spacing: 0
                             RowLayout {
-                                width: parent.width
-                                UiText { Layout.fillWidth: true; text: courseDelegate.entry.title; elide: Text.ElideRight; font.pixelSize: 13 }
+                                width: parent.width; spacing: 8
+                                Icon {
+                                    name: "page"; width: 16; height: 16
+                                    Layout.minimumWidth: 16; Layout.maximumWidth: 16
+                                    Layout.minimumHeight: 16; Layout.maximumHeight: 16
+                                    ink: courseDelegate.current ? Theme.text : Theme.muted
+                                }
+                                UiText { Layout.fillWidth: true; Layout.minimumWidth: 0; text: courseDelegate.entry.title; elide: Text.ElideRight; font.pixelSize: 14; color: courseDelegate.current ? Theme.text : Theme.muted; font.weight: courseDelegate.current ? Font.Medium : Font.Normal }
                                 UiText { text: courseDelegate.entry.time; font.family: Theme.mono; font.pixelSize: 11; color: Theme.subtle }
                             }
-                            UiText { width: parent.width; text: "•  " + courseDelegate.entry.summary; font.pixelSize: 12; color: Theme.muted; elide: Text.ElideRight }
-                            UiText { visible: text.length > 0; width: parent.width; text: courseDelegate.entry.detail; font.pixelSize: 12; color: Theme.muted; elide: Text.ElideRight }
+                            Row {
+                                x: 24; width: parent.width - 24; spacing: 6
+                                Rectangle { visible: courseDelegate.entry.active; width: 6; height: 6; radius: 3; color: Theme.green; anchors.verticalCenter: parent.verticalCenter }
+                                UiText {
+                                    width: parent.width - (courseDelegate.entry.active ? 12 : 0)
+                                    text: [courseDelegate.entry.summary, courseDelegate.entry.detail].filter(function(part) { return part.length > 0 }).join(" · ")
+                                    font.pixelSize: 12; color: Theme.subtle; elide: Text.ElideRight
+                                }
+                            }
                         }
                     }
                 }
-                UiText { id: courseHint; width: parent.width; text: appController.state.courseHint; wrapMode: Text.Wrap; color: Theme.subtle; font.pixelSize: 11; lineHeight: 1.5 }
+                Item { width: 1; height: 8 }
+                UiText { id: courseHint; visible: appController.courses.count === 0; width: parent.width; leftPadding: 10; rightPadding: 6; text: appController.state.courseHint; wrapMode: Text.Wrap; color: Theme.muted; font.pixelSize: 12; lineHeight: 1.5 }
             }
         }
         Column {
             id: actions
-            anchors.bottom: parent.bottom; anchors.bottomMargin: 24
-            anchors.left: parent.left; anchors.right: parent.right; anchors.margins: window.collapsed ? 10 : 14
-            spacing: 12
+            anchors.bottom: parent.bottom; anchors.bottomMargin: 16
+            anchors.left: parent.left; anchors.right: parent.right; anchors.margins: window.collapsed ? 8 : 12
+            spacing: 10
             UiText {
                 width: parent.width; visible: !window.collapsed && text.length > 0
                 text: appController.state.feedback; color: appController.state.feedbackError ? Theme.red : Theme.subtle
-                font.pixelSize: 11; wrapMode: Text.Wrap
-            }
-            UiButton {
-                objectName: "monitorButton"
-                width: parent.width; height: 36
-                text: window.collapsed ? "" : appController.state.actionText
-                iconName: appController.state.actionIcon
-                danger: appController.state.destructive
-                primary: !danger
-                tooltip: window.collapsed ? appController.state.actionText : ""
-                enabled: !appController.state.closing && !appController.state.stopping && (!appController.state.busy || appController.state.monitoring)
-                onClicked: appController.toggleMonitor()
+                font.pixelSize: 12; wrapMode: Text.Wrap
             }
         }
     }
@@ -167,25 +199,44 @@ ApplicationWindow {
         anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
         Item {
             id: topbar
-            height: 40; width: parent.width
-            Row {
-                x: 12; anchors.verticalCenter: parent.verticalCenter; spacing: 4
+            height: 44; width: parent.width
+            RowLayout {
+                x: 12; width: parent.width - topActions.width - 36
+                anchors.verticalCenter: parent.verticalCenter; spacing: 0
+                UiButton {
+                    visible: !window.settingsVisible
+                    text: "直播"; iconName: "camera"; height: 28
+                    onClicked: documentScroll.contentY = 0
+                }
+                UiText { visible: !window.settingsVisible; text: "/"; color: Theme.subtle; width: 14; horizontalAlignment: Text.AlignHCenter; height: 28 }
                 UiButton {
                     objectName: "pageBreadcrumb"
-                    text: window.settingsVisible ? "设置" : "课堂监控"
-                    iconName: window.settingsVisible ? "settings" : "radar"
+                    text: window.settingsVisible ? "设置" : window.coursePageTitle
+                    iconName: window.settingsVisible ? "settings" : "page"
+                    Layout.maximumWidth: Math.max(80, parent.width - 94)
+                    tooltip: text
+                    ink: Theme.text
                     height: 28
                     onClicked: {
-                        if (window.settingsVisible) window.settingsVisible = false
+                        if (window.settingsVisible) settingsPage.contentY = 0
                         else documentScroll.contentY = 0
                     }
                 }
+                Item { Layout.fillWidth: true }
             }
             Row {
+                id: topActions
                 anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
                 spacing: 2
+                UiButton {
+                    objectName: "ongoingAction"
+                    visible: appController.state.destructive && (window.settingsVisible || documentScroll.contentY > 120)
+                    text: appController.state.actionText; iconName: appController.state.actionIcon
+                    danger: true; height: 28; enabled: window.monitorEnabled
+                    onClicked: appController.toggleMonitor()
+                }
                 UiButton { objectName: "focusButton"; width: 28; height: 28; iconName: "focus"; tooltip: "聚焦页面"; onClicked: window.collapsed = !window.collapsed }
-                UiButton { objectName: "activityButton"; width: 28; height: 28; iconName: "history"; tooltip: "活动记录"; onClicked: { window.activityExpanded = true; Qt.callLater(function() { documentScroll.contentY = Math.min(activityToggle.y, Math.max(0, documentScroll.contentHeight - documentScroll.height)) }) } }
+                UiButton { objectName: "activityButton"; width: 28; height: 28; iconName: "history"; tooltip: "活动记录"; onClicked: { window.settingsVisible = false; window.activityExpanded = true; Qt.callLater(function() { documentScroll.contentY = Math.min(activityToggle.y, Math.max(0, documentScroll.contentHeight - documentScroll.height)) }) } }
                 UiButton {
                     id: moreButton
                     width: 28; height: 28; iconName: "more"; tooltip: "更多选项"; onClicked: moreMenu.open()
@@ -195,7 +246,7 @@ ApplicationWindow {
                         background: Rectangle { color: Theme.surface; radius: 4; border.width: 1; border.color: Theme.border }
                         contentItem: Column {
                             UiButton { width: parent.width; text: window.collapsed ? "退出聚焦" : "聚焦页面"; alignLeft: true; iconName: "focus"; onClicked: { moreMenu.close(); window.collapsed = !window.collapsed } }
-                            UiButton { width: parent.width; text: appController.state.dark ? "切换浅色外观" : "切换深色外观"; alignLeft: true; iconName: "sun"; onClicked: { moreMenu.close(); appController.toggleTheme() } }
+                            UiButton { width: parent.width; text: appController.state.dark ? "切换浅色外观" : "切换深色外观"; alignLeft: true; iconName: appController.state.dark ? "sun" : "moon"; onClicked: { moreMenu.close(); appController.toggleTheme() } }
                             UiButton { width: parent.width; text: "打开设置"; alignLeft: true; iconName: "settings"; onClicked: { moreMenu.close(); window.settingsVisible = true; window.collapsed = false } }
                         }
                     }
@@ -207,48 +258,97 @@ ApplicationWindow {
             objectName: "documentScroll"
             anchors.top: topbar.bottom; anchors.bottom: parent.bottom; width: parent.width
             visible: !window.settingsVisible
-            clip: true; contentWidth: width; contentHeight: document.height + 64
+            clip: true; contentWidth: width; contentHeight: document.height + 72
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
             Column {
                 id: document
                 objectName: "document"
-                x: (parent.width - width) / 2; y: 32
-                width: Math.min(840, documentScroll.width - 96)
+                x: (parent.width - width) / 2; y: 24
+                width: window.pageWidth
                 spacing: 0
-                Icon { name: "radar"; width: 36; ink: Theme.muted }
-                Item { width: 1; height: 8 }
-                UiText { text: "课堂监控"; font.family: Theme.heading; font.pixelSize: 32; font.weight: Font.Bold }
-                Item { width: 1; height: 24 }
-                Row {
-                    objectName: "statusRow"
-                    width: parent.width; height: 28
-                    Row { width: 124; spacing: 8; anchors.verticalCenter: parent.verticalCenter; Icon { name: "status"; width: 15; anchors.verticalCenter: parent.verticalCenter } UiText { text: "状态"; color: Theme.muted } }
-                    Rectangle {
-                        height: 24; width: statusText.implicitWidth + 28; radius: 4; anchors.verticalCenter: parent.verticalCenter
-                        color: appController.state.statusKind === "active" ? Theme.greenFill : appController.state.statusKind === "error" ? Theme.redFill : appController.state.statusKind === "waiting" ? Theme.amberFill : Theme.inset
+                RowLayout {
+                    width: parent.width; spacing: 24
+                    Column {
+                        Layout.fillWidth: true; spacing: 6
                         UiText {
-                            id: statusText; anchors.centerIn: parent
-                            text: "●  " + appController.state.status; font.pixelSize: 12
-                            color: appController.state.statusKind === "active" ? Theme.green : appController.state.statusKind === "error" ? Theme.red : appController.state.statusKind === "waiting" ? Theme.amber : Theme.muted
+                            objectName: "pageTitle"
+                            width: parent.width; text: window.coursePageTitle
+                            font.family: Theme.heading; font.pixelSize: 32; font.weight: Font.Bold
+                            lineHeight: 1.2; wrapMode: Text.Wrap
+                        }
+                        UiText {
+                            objectName: "pageSubtitle"
+                            width: parent.width
+                            text: !appController.form.live ? "转写电脑正在播放的课堂声音"
+                                : appController.state.courseSubtitle || (appController.state.selectedUrl ? "使用设置中的课程网址" : "课程、实时转写与签到提醒")
+                            color: Theme.muted; font.pixelSize: 13; wrapMode: Text.Wrap
+                        }
+                    }
+                    UiButton {
+                        objectName: "monitorButton"
+                        Layout.alignment: Qt.AlignTop; Layout.topMargin: 4
+                        height: 36; text: appController.state.actionText
+                        iconName: appController.state.actionIcon
+                        danger: appController.state.destructive; primary: !danger
+                        enabled: window.monitorEnabled
+                        tooltip: !enabled && !appController.state.busy ? "请先登录并选择课程，或在设置中切换声音来源" : ""
+                        onClicked: appController.toggleMonitor()
+                    }
+                }
+                Item { width: 1; height: 16 }
+                Property {
+                    objectName: "statusRow"
+                    iconName: "status"; name: "状态"
+                    Rectangle {
+                        height: 22; width: statusText.implicitWidth + 16; radius: 4; anchors.verticalCenter: parent.verticalCenter
+                        color: appController.state.statusKind === "active" ? Theme.greenFill : appController.state.statusKind === "error" ? Theme.redFill : appController.state.statusKind === "waiting" ? Theme.amberFill : Theme.inset
+                        Row {
+                            id: statusText; anchors.centerIn: parent; spacing: 6
+                            readonly property color tone: appController.state.statusKind === "active" ? Theme.green : appController.state.statusKind === "error" ? Theme.red : appController.state.statusKind === "waiting" ? Theme.amber : Theme.muted
+                            Rectangle { width: 6; height: 6; radius: 3; color: statusText.tone; anchors.verticalCenter: parent.verticalCenter }
+                            UiText { text: appController.state.status; font.pixelSize: 12; color: statusText.tone }
                         }
                     }
                 }
-                Item { width: 1; height: 8 }
-                Row {
-                    width: parent.width; height: 28
-                    Row { width: 124; spacing: 8; anchors.verticalCenter: parent.verticalCenter; Icon { name: "clock"; width: 15; anchors.verticalCenter: parent.verticalCenter } UiText { text: appController.state.timerLabel; color: Theme.muted } }
-                    Rectangle {
-                        height: 24; width: timerText.implicitWidth + 16; radius: 4; color: Theme.inset
-                        anchors.verticalCenter: parent.verticalCenter
-                        UiText { id: timerText; text: appController.state.elapsed; anchors.centerIn: parent; font.family: Theme.mono; color: Theme.muted }
-                    }
+                Property {
+                    iconName: "clock"; name: appController.state.timerLabel
+                    UiText { id: timerText; text: appController.state.elapsed; anchors.verticalCenter: parent.verticalCenter; font.family: Theme.mono; font.pixelSize: 13; color: Theme.text }
                 }
-                Item { width: 1; height: 32 }
-                UiText { text: "实时转写内容"; color: Theme.muted; font.pixelSize: 12 }
+                Property {
+                    iconName: "camera"; name: "音频来源"
+                    UiText { text: appController.form.live ? "后台直播音频" : "电脑声音"; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 14; color: Theme.text }
+                }
                 Item { width: 1; height: 12 }
+                Rectangle { width: parent.width; height: 1; color: Theme.border }
+                Item { width: 1; height: 20 }
+                Column {
+                    objectName: "courseNotice"
+                    visible: window.showCourseNotice
+                    width: parent.width; spacing: 8
+                    UiText { objectName: "courseNoticeTitle"; text: window.courseNoticeTitle; font.pixelSize: 18; font.weight: Font.DemiBold }
+                    UiText { width: parent.width; text: window.courseNoticeHint; color: window.courseProblem ? Theme.red : Theme.muted; wrapMode: Text.Wrap }
+                    Row {
+                        spacing: 8
+                        UiButton {
+                            objectName: "retryCoursesButton"
+                            visible: !appController.state.needsLogin && appController.courses.count === 0
+                            text: window.courseProblem ? "重试读取" : "刷新课程"; iconName: "refresh"; outline: true
+                            enabled: !appController.state.busy && !appController.state.closing
+                            onClicked: appController.refreshCourses()
+                        }
+                        UiButton {
+                            text: "账号与课程设置"; iconName: "settings"
+                            onClicked: { window.settingsVisible = true; settingsPage.contentY = 0 }
+                        }
+                    }
+                    Item { width: 1; height: 16 }
+                }
+                UiText { text: "实时转写"; font.family: Theme.heading; font.pixelSize: 20; font.weight: Font.DemiBold; lineHeight: 1.3 }
+                Item { width: 1; height: 10 }
                 Item {
                     objectName: "quoteBlock"
+                    visible: !window.showCourseNotice || appController.state.transcriptFinal
                     width: parent.width; height: Math.max(28, transcript.contentHeight) + 8
                     Rectangle { width: 3; height: parent.height; color: Theme.text; radius: 0 }
                     TextEdit {
@@ -263,46 +363,53 @@ ApplicationWindow {
                         font.family: Theme.body; font.pixelSize: 17
                         renderType: Text.QtRendering
                         readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
-                        selectionColor: Theme.selected; selectedTextColor: Theme.text
+                        selectionColor: Theme.accentFill; selectedTextColor: Theme.text
                     }
                 }
-                UiText { visible: text.length > 0; width: parent.width - 17; x: 17; topPadding: 8; text: appController.state.transcriptHint; color: Theme.subtle; font.pixelSize: 12; wrapMode: Text.Wrap }
+                UiText { visible: (!window.showCourseNotice || appController.state.transcriptFinal) && text.length > 0; width: parent.width - 17; x: 17; topPadding: 8; text: appController.state.transcriptHint; color: Theme.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
+                UiText { visible: window.showCourseNotice && !appController.state.transcriptFinal; width: parent.width; text: "开始监控后，课堂内容将实时显示在这里。"; color: Theme.muted; font.pixelSize: 14; wrapMode: Text.Wrap }
                 Item { width: 1; height: 24 }
                 Rectangle {
+                    id: codeCard
                     objectName: "codeCard"
-                    width: parent.width; height: 76; radius: 4
-                    color: Theme.callout; border.width: Theme.dark ? 1 : 0; border.color: Theme.border
+                    readonly property bool hasCode: appController.state.code.length === 4
+                    width: parent.width; height: 64; radius: 4
+                    color: hasCode ? Theme.callout : Theme.inset
                     Row {
                         anchors.left: parent.left; anchors.leftMargin: 16; anchors.verticalCenter: parent.verticalCenter
                         spacing: 12
-                        Icon { name: "key"; width: 20; ink: Theme.calloutInk; anchors.verticalCenter: parent.verticalCenter }
-                        UiText { text: "签到码"; color: Theme.calloutInk; anchors.verticalCenter: parent.verticalCenter }
-                        Row {
-                            spacing: 8
-                            Repeater {
-                                model: 4
-                                Rectangle {
-                                    required property int index
-                                    width: 40; height: 42; radius: 4; color: Theme.surface
-                                    border.width: 1; border.color: Theme.border
-                                    UiText { anchors.centerIn: parent; text: appController.state.code.length === 4 ? appController.state.code[index] : "—"; font.family: Theme.mono; font.pixelSize: 24; font.bold: true; color: appController.state.code.length ? Theme.text : Theme.subtle }
-                                }
-                            }
+                        Icon { name: "key"; width: 18; ink: codeCard.hasCode ? Theme.calloutInk : Theme.muted; anchors.verticalCenter: parent.verticalCenter }
+                        UiText { text: "签到码"; color: codeCard.hasCode ? Theme.calloutInk : Theme.muted; font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
+                        UiText {
+                            objectName: "codeValue"
+                            text: codeCard.hasCode ? appController.state.code : "等待识别"
+                            font.family: codeCard.hasCode ? Theme.mono : Theme.body
+                            font.pixelSize: codeCard.hasCode ? 28 : 14
+                            font.letterSpacing: codeCard.hasCode ? 3 : 0
+                            font.weight: codeCard.hasCode ? Font.DemiBold : Font.Normal
+                            color: codeCard.hasCode ? Theme.text : Theme.muted
+                            anchors.verticalCenter: parent.verticalCenter
                         }
-                        Item { width: 4; height: 1 }
-                        UiButton { objectName: "copyButton"; anchors.verticalCenter: parent.verticalCenter; text: appController.state.copied ? "已复制" : "复制"; iconName: appController.state.copied ? "check" : "copy"; enabled: appController.state.code.length === 4; onClicked: appController.copyCode() }
+                    }
+                    UiButton {
+                        objectName: "copyButton"
+                        anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter
+                        text: appController.state.copied ? "已复制" : "复制"; iconName: appController.state.copied ? "check" : "copy"
+                        ink: codeCard.hasCode ? Theme.calloutInk : Theme.muted
+                        enabled: appController.state.code.length === 4; onClicked: appController.copyCode()
                     }
                 }
-                Item { width: 1; height: 20 }
+                Item { width: 1; height: 28 }
                 UiButton {
                     id: activityToggle
                     objectName: "activityToggle"
-                    width: parent.width; alignLeft: true
+                    width: parent.width; height: 34; alignLeft: true
                     onClicked: window.activityExpanded = !window.activityExpanded
                     contentItem: Row {
-                        spacing: 8
-                        Icon { name: "triangle"; width: 12; rotation: window.activityExpanded ? 90 : 0; anchors.verticalCenter: parent.verticalCenter; Behavior on rotation { NumberAnimation { duration: 100 } } }
-                        UiText { text: "活动记录"; color: Theme.muted; font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
+                        leftPadding: 6; spacing: 8
+                        Icon { name: "triangle"; width: 12; ink: Theme.text; rotation: window.activityExpanded ? 90 : 0; anchors.verticalCenter: parent.verticalCenter; Behavior on rotation { NumberAnimation { duration: 100 } } }
+                        UiText { text: "活动记录"; color: Theme.text; font.pixelSize: 15; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+                        UiText { visible: appController.activity.count > 0; text: appController.activity.count + " 条"; color: Theme.subtle; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
                     }
                 }
                 Loader {
@@ -312,10 +419,10 @@ ApplicationWindow {
                     sourceComponent: Column {
                     width: parent.width; spacing: 12
                     Item { width: 1; height: 4 }
-                    UiText { visible: appController.activity.count === 0; text: "暂无签到记录"; color: Theme.subtle; x: 24 }
+                    UiText { visible: appController.activity.count === 0; text: "暂无签到记录"; color: Theme.subtle; x: 26 }
                     ListView {
                         id: activityList
-                        x: 24; width: parent.width - 24; height: Math.min(contentHeight, 240)
+                        x: 26; width: parent.width - 26; height: Math.min(contentHeight, 240)
                         model: appController.activity
                         clip: true; reuseItems: true; spacing: 8
                         onCountChanged: if (window.followLogs) Qt.callLater(positionViewAtEnd)
@@ -333,13 +440,35 @@ ApplicationWindow {
                     }
                     Row {
                         anchors.right: parent.right; spacing: 12
-                        CheckBox { text: "自动滚动"; checked: window.followLogs; onToggled: window.followLogs = checked; font.family: Theme.body; font.pixelSize: 12; palette.windowText: Theme.muted; palette.text: Theme.muted }
-                        UiButton { text: "清空"; onClicked: appController.clearActivity() }
+                        Row {
+                            height: 24; spacing: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            UiText { text: "自动滚动"; color: Theme.muted; font.pixelSize: 13; height: 24; verticalAlignment: Text.AlignVCenter }
+                            AbstractButton {
+                                id: followToggle
+                                objectName: "followToggle"
+                                width: 30; height: 18; checkable: true; checked: window.followLogs
+                                anchors.verticalCenter: parent.verticalCenter
+                                hoverEnabled: true; Accessible.name: "自动滚动"
+                                onToggled: window.followLogs = checked
+                                background: Rectangle {
+                                    radius: 9
+                                    color: followToggle.checked ? Theme.accent : followToggle.hovered ? Theme.outline : Theme.border
+                                    Behavior on color { ColorAnimation { duration: 90 } }
+                                    Rectangle {
+                                        x: followToggle.checked ? 14 : 2; y: 2; width: 14; height: 14; radius: 7
+                                        color: "#ffffff"
+                                        Behavior on x { NumberAnimation { duration: 90 } }
+                                    }
+                                }
+                            }
+                        }
+                        UiButton { text: "清空"; outline: true; onClicked: appController.clearActivity() }
                     }
                     ListView {
                         id: logList
                         objectName: "logList"
-                        width: parent.width; height: 240
+                        x: 26; width: parent.width - 26; height: 240
                         model: appController.logs
                         clip: true; reuseItems: true
                         onCountChanged: if (window.followLogs) Qt.callLater(positionViewAtEnd)
@@ -357,7 +486,9 @@ ApplicationWindow {
             }
         }
         SettingsPanel {
+            id: settingsPage
             objectName: "settingsPage"
+            documentWidth: window.pageWidth
             anchors.top: topbar.bottom; anchors.bottom: parent.bottom
             width: parent.width
             visible: window.settingsVisible
