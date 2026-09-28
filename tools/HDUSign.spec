@@ -27,6 +27,11 @@ for package in ('sherpa_onnx', 'soundcard', 'fastembed', 'onnxruntime',
     binaries += package_binaries
     hiddenimports += package_imports
 
+# These optional system libraries are pulled in by the build environment but
+# make QtCore prefer an incompatible ICU/OpenSSL pair in the frozen app.
+_qt_conflicting_dlls = {'icudt78.dll', 'icuuc.dll', 'libcrypto-3-x64.dll', 'libssl-3-x64.dll'}
+binaries = [entry for entry in binaries if Path(entry[0]).name.lower() not in _qt_conflicting_dlls]
+
 
 a = Analysis(
     [str(ROOT / 'hdusign' / '__main__.py')],
