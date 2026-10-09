@@ -15,6 +15,13 @@ ASR_FILES = ("encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.tx
 FFMPEG_FILES = ("ffmpeg.exe", "LICENSE", "README.txt", "SOURCE.json", "version.txt",
                 "buildconf.txt", "license-notice.txt")
 
+# Keep the handles alive for the lifetime of the process.  Qt's Windows DLLs
+# live in ``_internal/PySide6`` while their ICU/OpenSSL dependencies may be
+# collected into the one-folder root by PyInstaller.  The frozen bootloader
+# does not guarantee that a DLL loaded from the nested PySide6 directory can
+# resolve dependencies from that parent when the user's PATH is minimal.
+_dll_directory_handles = []
+
 
 def application_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -24,6 +31,24 @@ def application_root() -> Path:
 
 def resource_root() -> Path:
     return Path(getattr(sys, "_MEIPASS", application_root()))
+
+
+def configure_qt_runtime() -> None:
+    """Make bundled Qt dependencies resolvable before importing PySide6."""
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return
+    root = resource_root()
+    if not root.is_dir():
+        return
+    for directory in (root, root / "PySide6", root / "shiboken6"):
+        if not directory.is_dir():
+            continue
+        try:
+            _dll_directory_handles.append(os.add_dll_directory(str(directory)))
+        except (FileNotFoundError, OSError):
+            # Older Windows builds may not expose AddDllDirectory.  The
+            # regular loader path is still allowed to resolve the module.
+            continue
 
 
 def configure_browser_runtime() -> None:

@@ -47,6 +47,13 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# PyInstaller's dependency analysis can add the same optional libraries again
+# after the explicit ``binaries`` list is filtered above (the build runtime
+# exposes a Poppler directory on its search path).  Remove those auto-collected
+# copies from the final TOC as well so Qt resolves the Windows ICU pair that it
+# was built against instead of the incompatible Poppler ICU 78 exports.
+a.binaries = [entry for entry in a.binaries
+              if Path(entry[0]).name.lower() not in _qt_conflicting_dlls]
 pyz = PYZ(a.pure)
 
 exe = EXE(

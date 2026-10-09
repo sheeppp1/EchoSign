@@ -7,7 +7,7 @@ import sys
 
 
 def main(argv=None) -> int:
-    from hdusign.runtime import application_root
+    from hdusign.runtime import application_root, configure_qt_runtime
 
     # Windowed executables can inherit GBK-encoded redirected handles. ASR text
     # must not crash logging, and the attendance parent reads child logs as UTF-8.
@@ -16,6 +16,7 @@ def main(argv=None) -> int:
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
     os.chdir(application_root())
+    configure_qt_runtime()
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "--sign-worker":
         from hdusign.browser import sign_worker
