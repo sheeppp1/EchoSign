@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EchoSign · 阿里云验证码测试</title>
+  <style>
+    body { font: 16px/1.6 system-ui, sans-serif; max-width: 680px; margin: 48px auto; padding: 0 20px; }
+    button { padding: 10px 18px; font-size: 16px; cursor: pointer; }
+    #status { white-space: pre-wrap; background: #f5f5f5; padding: 12px; border-radius: 6px; }
+  </style>
+  <script>
+    // These are client-side identifiers only. Never put AccessKey/Secret here.
+    window.AliyunCaptchaConfig = { region: 'cn', prefix: 'a34wxj' };
+  </script>
+  <script src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"></script>
+</head>
+<body>
+  <h1>阿里云验证码测试</h1>
+  <p>场景 <code>j0l0dikm</code>：测试策略为“无痕验证不通过，二次挑战通过”。点击按钮后应弹出真实二次挑战。</p>
+  <button id="captcha-button" type="button">开始测试</button>
+  <div id="captcha-element"></div>
+  <p id="status">正在初始化……</p>
+
+  <script>
+    let captcha;
+    let initialized = false;
+    let lastVerifyCode = '';
+    const status = document.getElementById('status');
+    function setStatus(text) { status.textContent = text; }
+    function getInstance(instance) {
+      captcha = instance;
+      if (!initialized) {
+        initialized = true;
+        setStatus('已初始化，点击“开始测试”。');
+      }
+    }
+
+    async function captchaVerifyCallback(captchaVerifyParam) {
+      try {
+        const response = await fetch('/aliyun-captcha/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ captchaVerifyParam })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(`客户端参数已收到，但服务端验签不可用：${result.error || response.status}`);
+          return { captchaResult: false, bizResult: false };
+        }
+        lastVerifyCode = result.verifyCode || '';
+        setStatus(`服务端返回 ${lastVerifyCode || '未知状态'}。`);
+        return { captchaResult: result.captchaVerifyResult === true, bizResult: result.ok === true };
+      } catch (error) {
+        setStatus('客户端参数已收到，但无法连接本地验签服务。');
+        return { captchaResult: false, bizResult: false };
+      }
+    }
+
+    function onBizResultCallback(bizResult) {
+      if (bizResult === true) {
+        setStatus(`业务验证通过${lastVerifyCode ? `（服务端返回 ${lastVerifyCode}）` : '。'}`);
+      }
+      else setStatus(status.textContent + '\n阿里云客户端验证流程已结束；业务未通过。');
+    }
+
+    window.initAliyunCaptcha({
+      SceneId: 'j0l0dikm',
+      mode: 'popup',
+      element: '#captcha-element',
+      button: '#captcha-button',
+      captchaVerifyCallback,
+      onBizResultCallback,
+      getInstance,
+      language: 'cn',
+      slideStyle: { width: 360, height: 40 }
+    });
+  </script>
+</body>
+</html>

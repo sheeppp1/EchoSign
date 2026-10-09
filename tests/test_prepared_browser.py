@@ -182,11 +182,15 @@ class WorkerProtocolTests(unittest.TestCase):
             folder = Path(temp)
             calls, failures = [], []
             stack.enter_context(patch.object(browser, "ensure_logged_in"))
+            stack.enter_context(patch.object(browser, "prepared_page_ready", return_value=True))
             ready = stack.enter_context(patch.object(browser, "open_sign_in"))
             def sign(ctx, page, code, *, on_stage, cancelled):
                 calls.append(code)
                 for stage in ("page_ready", "digits_entered", "submit", "response"):
                     on_stage(stage, time.time())
+                on_stage("verification_required", time.time())
+                progress = json.loads((folder / f"progress-{len(calls)}.json").read_text(encoding="utf-8"))
+                self.assertEqual(progress, {"status": "verification_required", "sign_code": code})
                 return SignResult("success", code, "OK")
             stack.enter_context(patch.object(browser, "sign_with_code", side_effect=sign))
             def run():
@@ -219,6 +223,21 @@ class WorkerProtocolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 browser.serve_prepared(None, Mock(), {}, folder)
             sign.assert_not_called()
+
+    def test_expired_prewarmed_page_reports_failure_without_typing_or_retry(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(browser, "ensure_logged_in") as login, \
+                patch.object(browser, "open_sign_in"), \
+                patch.object(browser, "prepared_page_ready", return_value=False), \
+                patch.object(browser, "sign_with_code") as sign:
+            folder = Path(temp)
+            write_json(folder / "request-1.json", {"id": 1, "code": "1234"})
+            browser.serve_prepared(None, Mock(), {}, folder)
+            result = SignResult.read(folder / "result-1.json", "1234")
+            self.assertEqual(result.status, "failure")
+            self.assertIn("本次未输入或提交", result.message)
+            sign.assert_not_called()
+            login.assert_called_once()
 
     def test_request_id_mismatch_is_rejected_without_submitting(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(browser, "ensure_logged_in"), \

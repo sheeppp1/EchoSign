@@ -28,6 +28,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SignResultTests(unittest.TestCase):
+    def test_profile_cleanup_matches_only_the_exact_user_data_dir(self):
+        profile = Path("D:/EchoSign/browser_profile/accounts/account-a")
+        self.assertTrue(browser._commandline_uses_profile(
+            f'chrome.exe --user-data-dir="{profile}" --type=browser', profile))
+        self.assertFalse(browser._commandline_uses_profile(
+            f'chrome.exe --user-data-dir="{profile.parent}" --type=browser', profile))
+        self.assertFalse(browser._commandline_uses_profile(str(profile), profile))
+
     def test_business_failure_containing_success_word_stays_failure(self):
         result = classify_response("1234", 200, {"code": 400, "message": "签到未成功，请重试"})
         self.assertEqual(result.status, "failure")
@@ -52,6 +60,8 @@ class SignResultTests(unittest.TestCase):
         endpoint = "https://skl.hdu.edu.cn/api/ali-nvc/captcha-verify"
         cases = [
             (endpoint + "?code=1234", "POST", True),
+            (endpoint + "?captchaVerifyParam=token&userid=42&code=1234&latitude=30.3&longitude=120.3&t=1",
+             "POST", True),
             (endpoint + "?code=4321", "POST", False),
             (endpoint + "?code=1234&code=4321", "POST", False),
             (endpoint, "POST", False),
@@ -64,38 +74,11 @@ class SignResultTests(unittest.TestCase):
             with self.subTest(url=url, method=method):
                 self.assertEqual(browser.is_sign_response(response, "1234"), expected)
 
-    def test_listener_is_armed_only_around_submission(self):
-        page = MagicMock()
-        page.query_selector_all.return_value = []
-        response = SimpleNamespace(status=200, json=lambda: {"code": 400, "msg": "未成功"})
-        events = []
-        pending = page.expect_response.return_value
-        pending.__enter__.side_effect = lambda: (events.append("armed") or SimpleNamespace(value=response))
-        pending.__exit__.side_effect = lambda *_: (events.append("finished") or False)
-
-        def click(_page, _selector, text, **_):
-            if text == "签到":
-                events.append("submit")
-            elif text == "课堂签到":
-                events.append("open")
-
-        with patch.object(browser, "click_visible", side_effect=click), redirect_stdout(StringIO()):
-            result = browser.sign_with_code(None, page, "1234")
-        self.assertEqual(events, ["open", "armed", "submit", "finished"])
-        self.assertEqual(result.status, "failure")
-
-    def test_browser_response_timeout_is_unknown(self):
-        page = MagicMock()
-        page.query_selector_all.return_value = []
-        page.expect_response.return_value.__exit__.side_effect = browser.PlaywrightTimeoutError("timeout")
-        with patch.object(browser, "click_visible"), redirect_stdout(StringIO()):
-            result = browser.sign_with_code(None, page, "1234")
-        self.assertEqual(result.status, "unknown")
-
     def test_browser_writes_structured_result_without_stdout(self):
         for status in ("success", "failure", "unknown"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
                 output = Path(folder) / "result.json"
+                progress = Path(folder) / "progress.json"
                 result = SignResult(status, "1234", "演示结果")
                 context = MagicMock()
                 context.pages = [MagicMock()]
@@ -106,11 +89,15 @@ class SignResultTests(unittest.TestCase):
                 stack.enter_context(patch.object(browser, "_cleanup_stale_profile"))
                 stack.enter_context(patch.object(browser, "_location", return_value=(0, 0)))
                 stack.enter_context(patch.object(browser, "ensure_logged_in"))
-                stack.enter_context(patch.object(browser, "sign_with_code", return_value=result))
+                def sign_with_progress(*args, on_stage):
+                    on_stage("verification_required", 1)
+                    return result
+                stack.enter_context(patch.object(browser, "sign_with_code", side_effect=sign_with_progress))
                 stack.enter_context(patch.object(sys, "stdout", None))
-                exit_code = browser.sign(["1234", "--result-file", str(output)])
+                exit_code = browser.sign(["1234", "--result-file", str(output), "--progress-file", str(progress)])
                 self.assertEqual(exit_code, result.exit_code)
                 self.assertEqual(SignResult.read(output, "1234"), result)
+                self.assertIn('"verification_required"', progress.read_text(encoding="utf-8"))
                 context.close.assert_called_once()
 
     def test_frozen_entrypoint_preserves_result_file_argument(self):

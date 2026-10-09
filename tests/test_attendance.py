@@ -11,10 +11,50 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from hdusign.attendance import AutoSigner
+from hdusign.attendance import (
+    AutoSigner,
+    SignResult,
+    _BrowserSession,
+    make_auto_signer,
+    write_json,
+)
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_submit_rejects_non_ascii_or_non_four_digit_codes(self):
+        signer = AutoSigner(lambda *_: None)
+        self.addCleanup(signer.close)
+        for code in ("", "123", "12345", "12a4", "１２３４", None, 1234):
+            with self.subTest(code=code):
+                self.assertFalse(signer.submit(code))
+        self.assertIsNone(signer._pending)
+        self.assertIsNone(signer._worker)
+
+    def test_repeated_current_code_does_not_submit_twice_or_replace_new_pending_code(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        signer = AutoSigner(lambda *_: None)
+        self.addCleanup(signer.close)
+        self.addCleanup(release.set)
+        def sign(code):
+            calls.append(code)
+            if code == "1234":
+                entered.set()
+                release.wait(3)
+        with patch.object(signer, "_sign_one", side_effect=sign):
+            signer.submit("1234")
+            self.assertTrue(entered.wait(2))
+            signer.submit("1234")
+            signer.submit("5678")
+            detected_at = signer._pending[1]
+            signer.submit("5678")
+            self.assertEqual(signer._pending, ("5678", detected_at))
+            signer.submit("1234")
+            release.set()
+            signer.close(cancel=False)
+        self.assertEqual(calls, ["1234", "5678"])
+        self.assertIsNone(signer._active_code)
+
     def test_submissions_before_worker_start_create_only_one_worker(self):
         gate = threading.Event()
         thread_type = threading.Thread
@@ -127,6 +167,154 @@ class SchedulerTests(unittest.TestCase):
             signer.submit("5678")
             signer.close(cancel=False)
         self.assertEqual(calls, ["1234", "5678"])
+
+    def test_notification_failure_does_not_escape_worker(self):
+        def notify(*_):
+            raise RuntimeError("notification service unavailable")
+
+        signer = AutoSigner(notify)
+        self.addCleanup(signer.close)
+        with redirect_stdout(StringIO()) as output:
+            signer._notify_verification("1234")
+            signer._notify_result(SignResult("success", "1234", "OK"))
+        self.assertIn("签到通知失败", output.getvalue())
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_make_auto_signer_uses_default_for_invalid_or_unbounded_timeout(self):
+        for value in (None, "bad", True, float("nan"), float("inf"), 0, 29, 1801):
+            with self.subTest(value=value):
+                alerter = MagicMock()
+                signer = make_auto_signer(
+                    {"auto_sign": {"enabled": True, "timeout_seconds": value}}, alerter)
+                self.assertIsNotNone(signer)
+                self.assertEqual(signer.timeout_s, 180)
+                signer.close()
+
+    def test_make_auto_signer_accepts_bounded_timeout(self):
+        signer = make_auto_signer(
+            {"auto_sign": {"enabled": True, "timeout_seconds": "600"}}, MagicMock())
+        self.assertIsNotNone(signer)
+        self.addCleanup(signer.close)
+        self.assertEqual(signer.timeout_s, 600)
+
+
+class PreparedSubmitCleanupTests(unittest.TestCase):
+    @staticmethod
+    def _session(directory):
+        session = _BrowserSession(threading.Event(), 1)
+        session.directory = Path(directory)
+        session.proc = MagicMock()
+        session.proc.poll.return_value = None
+        return session
+
+    def test_failed_write_terminates_child_before_clearing_in_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(directory)
+            observed = []
+            def terminate(proc):
+                observed.append(session.in_request)
+                proc.poll.return_value = -9
+            with patch("hdusign.attendance.write_json", side_effect=OSError("disk full")), \
+                    patch.object(AutoSigner, "_terminate_child", side_effect=terminate) as kill:
+                with self.assertRaises(OSError):
+                    session.submit("1234", time.time())
+            kill.assert_called_once_with(session.proc)
+            self.assertEqual(observed, [True])
+            self.assertFalse(session.in_request)
+
+    def test_timeout_and_result_read_errors_terminate_child(self):
+        for phase in ("timeout", "invalid_json", "read_error"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                session = self._session(directory)
+                result_path = Path(directory) / "result-1.json"
+                if phase == "invalid_json":
+                    result_path.write_text("{invalid JSON", encoding="utf-8")
+                    error = ValueError
+                elif phase == "read_error":
+                    # Existence is seen by the waiter, but the file disappears
+                    # before it is opened for the result read.
+                    session._wait = MagicMock()
+                    error = OSError
+                else:
+                    session._wait = MagicMock(side_effect=subprocess.TimeoutExpired("wait", 1))
+                    error = subprocess.TimeoutExpired
+                with patch.object(AutoSigner, "_terminate_child") as kill:
+                    with self.assertRaises(error):
+                        session.submit("1234", time.time())
+                kill.assert_called_once_with(session.proc)
+                self.assertFalse(session.in_request)
+
+    def test_failed_termination_retains_inflight_marker_and_original_error(self):
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            session = self._session(directory)
+            session._wait = MagicMock(side_effect=subprocess.TimeoutExpired("wait", 1))
+            with patch.object(AutoSigner, "_terminate_child", side_effect=OSError("kill failed")):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    session.submit("1234", time.time())
+            self.assertTrue(session.in_request)
+            proc = session.proc
+            with patch.object(AutoSigner, "_terminate_child") as kill:
+                session.close()
+            kill.assert_called_once_with(proc)
+            proc.wait.assert_not_called()
+
+    def test_confirmed_result_keeps_prepared_child_reusable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(directory)
+            result_path = Path(directory) / "result-1.json"
+            write_json(result_path, {"status": "success", "sign_code": "1234", "message": "OK"})
+            session._wait = MagicMock()
+            with patch.object(AutoSigner, "_terminate_child") as kill:
+                result = session.submit("1234", time.time())
+            self.assertEqual(result.status, "success")
+            kill.assert_not_called()
+            self.assertFalse(session.in_request)
+
+
+class SignControlFlowNotificationTests(unittest.TestCase):
+    def test_prepared_success_survives_failing_notification_callback(self):
+        notify = MagicMock(side_effect=RuntimeError("notification unavailable"))
+        signer = AutoSigner(notify)
+        with tempfile.TemporaryDirectory() as directory:
+            session = _BrowserSession(signer._stop, 1, on_verification=signer._notify_verification)
+            session.directory = Path(directory)
+            session.proc = MagicMock()
+            session.proc.poll.return_value = None
+            signer._session = session
+            write_json(session.directory / "progress-1.json",
+                       {"status": "verification_required", "sign_code": "1234"})
+            def finish(_):
+                notify.assert_called_once()
+                SignResult("success", "1234", "OK").write(session.directory / "result-1.json")
+            with patch.object(signer._stop, "wait", side_effect=finish), \
+                    patch.object(signer, "_notify_result", wraps=signer._notify_result) as result, \
+                    redirect_stdout(StringIO()) as output:
+                signer._sign_one("1234")
+            self.assertEqual(result.call_args.args[0].status, "success")
+            self.assertEqual(notify.call_count, 2)
+            self.assertIs(signer._session, session)
+            self.assertFalse(session.in_request)
+        self.assertIn("签到通知失败", output.getvalue())
+
+    def test_cold_start_success_survives_failing_notification_callback(self):
+        notify = MagicMock(side_effect=RuntimeError("notification unavailable"))
+        signer = AutoSigner(notify)
+        def run_child(command, *, progress):
+            progress_path = Path(command[command.index("--progress-file") + 1])
+            write_json(progress_path, {"status": "verification_required", "sign_code": "1234"})
+            progress()
+            notify.assert_called_once()
+            result_path = Path(command[command.index("--result-file") + 1])
+            write_json(result_path, {"status": "success", "sign_code": "1234", "message": "OK"})
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with patch.object(signer, "_run_child", side_effect=run_child), \
+                patch.object(signer, "_notify_result", wraps=signer._notify_result) as result, \
+                redirect_stdout(StringIO()) as output:
+            signer._sign_one("1234")
+        self.assertEqual(result.call_args.args[0].status, "success")
+        self.assertEqual(notify.call_count, 2)
+        self.assertIn("签到通知失败", output.getvalue())
 
 
 class ChildCancellationTests(unittest.TestCase):

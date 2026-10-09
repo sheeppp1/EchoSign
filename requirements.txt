@@ -8,3 +8,4 @@ sherpa-onnx==1.13.7
 fastembed==0.8.0
 playwright==1.59.0
 requests==2.34.2
+alibabacloud_captcha20230305==1.1.4

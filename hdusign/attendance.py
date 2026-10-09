@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from contextlib import ExitStack
 import json
+import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +18,18 @@ from hdusign.runtime import application_root
 
 ROOT = application_root()
 
+# Keep the task deadline long enough for a user to complete a challenge while
+# preventing malformed configuration from creating an effectively unbounded
+# worker or a zero/negative deadline.
+DEFAULT_TIMEOUT_SECONDS = 180
+MIN_TIMEOUT_SECONDS = 30
+MAX_TIMEOUT_SECONDS = 1800
+
+
+def diagnostic_sign_code(code: str) -> str:
+    """Reveal codes in operation diagnostics only with explicit local opt-in."""
+    return code if os.getenv("ECHOSIGN_DEBUG_SIGN_INPUT") == "1" else "****"
+
 
 def write_json(path: Path, data: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -27,6 +41,26 @@ def browser_command(*args: str) -> list[str]:
     prefix = [sys.executable] if getattr(sys, "frozen", False) else [
         sys.executable, "-X", "utf8", "-m", "hdusign"]
     return [*prefix, *args]
+
+
+def verification_progress(path: Path, code: str, notify):
+    """One prompt per request, independent of buffered/windowless child logs."""
+    sent = False
+
+    def poll():
+        nonlocal sent
+        if sent or notify is None or not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if (isinstance(data, dict) and data.get("status") == "verification_required"
+                and data.get("sign_code") == code):
+            sent = True
+            notify(code)
+
+    return poll
 
 
 @dataclass(frozen=True)
@@ -83,6 +117,7 @@ class AutoSigner:
         self._condition = threading.Condition()
         self._stop = stop if stop is not None else threading.Event()
         self._pending: tuple[str, float] | None = None
+        self._active_code: str | None = None
         self._closing = False
         self._worker: threading.Thread | None = None
         self._prewarm_browser = prewarm_browser
@@ -115,9 +150,19 @@ class AutoSigner:
         return True
 
     def submit(self, code: str) -> bool:
+        # Speech recognition can return arbitrary text.  Only pass an exact
+        # four-character ASCII code to the browser worker; ``str.isdigit`` is
+        # intentionally avoided because it accepts non-ASCII numerals.
+        if (not isinstance(code, str) or len(code) != 4
+                or any(char < "0" or char > "9" for char in code)):
+            return False
         with self._condition:
             if self._closing or self._stop.is_set():
                 return False
+            # Repeated recognition while verification is pending belongs to
+            # the current request, not a second submission to the platform.
+            if code == self._active_code or (self._pending is not None and code == self._pending[0]):
+                return True
             self._pending = (code, time.time())
             self._start_worker()
             self._condition.notify_all()
@@ -157,6 +202,7 @@ class AutoSigner:
                     if self._stop.is_set() or (self._closing and self._pending is None):
                         return
                     pending, self._pending = self._pending, None
+                    self._active_code = pending[0] if pending is not None else None
                     self._prepare_requested = False
                 if self._prewarm_browser and self._session is None and not self._prepare_failed:
                     self._prepare_browser()
@@ -167,6 +213,9 @@ class AutoSigner:
                     self._sign_one(code)
                 except Exception as exc:
                     print(f"[warn] 签到任务异常：{exc}")
+                finally:
+                    with self._condition:
+                        self._active_code = None
         finally:
             try:
                 if self._session is not None:
@@ -175,10 +224,11 @@ class AutoSigner:
                 self._session = None
                 with self._condition:
                     self._pending = None
+                    self._active_code = None
                     self._closing = True
 
     def _prepare_browser(self) -> None:
-        session = _BrowserSession(self._stop, self.timeout_s)
+        session = _BrowserSession(self._stop, self.timeout_s, on_verification=self._notify_verification)
         self._session = session
         try:
             session.open()
@@ -207,7 +257,7 @@ class AutoSigner:
             proc.kill()
         proc.wait()
 
-    def _run_child(self, command: list[str]):
+    def _run_child(self, command: list[str], *, progress=None):
         if self._stop.is_set():
             return None
         # Files avoid pipe-reader threads blocking shutdown if a browser inherits
@@ -221,6 +271,8 @@ class AutoSigner:
                     while proc.poll() is None:
                         if self._stop.is_set():
                             return None
+                        if progress is not None:
+                            progress()
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(command, self.timeout_s)
@@ -237,7 +289,7 @@ class AutoSigner:
     def _sign_one(self, code: str) -> None:
         if self._stop.is_set():
             return
-        print(f"[autosign] 听到签到码 {code}, 启动自动签到...")
+        print(f"[autosign] 收到四位签到码 {diagnostic_sign_code(code)}, 启动自动签到...")
         if self._session is not None and not self._session.is_alive():
             self._session.close()
             self._session = None
@@ -260,7 +312,10 @@ class AutoSigner:
             # for both frozen and source runs; logs never determine success.
             with tempfile.TemporaryDirectory(prefix="hdusign-result-") as temporary:
                 result_path = Path(temporary) / "result.json"
-                proc = self._run_child([*cmd, "--result-file", str(result_path)])
+                progress_path = Path(temporary) / "progress.json"
+                proc = self._run_child(
+                    [*cmd, "--result-file", str(result_path), "--progress-file", str(progress_path)],
+                    progress=verification_progress(progress_path, code, self._notify_verification))
                 if proc is None:
                     print("[autosign] 浏览器任务已停止；已提交的签到请到平台核对")
                     return
@@ -277,16 +332,33 @@ class AutoSigner:
 
         self._notify_result(result)
 
+    def _notify_verification(self, code: str) -> None:
+        if not self._stop.is_set():
+            display_code = diagnostic_sign_code(code)
+            self._safe_notify(
+                f"签到等待验证, 码 {display_code}",
+                f"请查看签到浏览器；如有验证码，请手动完成。软件会继续核对签到结果 (码 {display_code})。")
+
     def _notify_result(self, result: SignResult) -> None:
         if self._stop.is_set():
             return
-        code = result.sign_code
+        code = diagnostic_sign_code(result.sign_code)
         if result.status == "success":
-            self.notify(f"自动签到成功, 码 {code}", f"✅ 已自动完成签到 (码 {code})")
+            self._safe_notify(f"自动签到成功, 码 {code}", f"✅ 已自动完成签到 (码 {code})")
         elif result.status == "failure":
-            self.notify(f"自动签到失败, 码 {code}", f"❌ 签到失败 (码 {code})\n{result.message}")
+            self._safe_notify(f"自动签到失败, 码 {code}", f"❌ 签到失败 (码 {code})\n{result.message}")
         else:
-            self.notify(f"自动签到结果未知, 码 {code}", f"⚠️ 请人工确认: {result.message}")
+            self._safe_notify(f"自动签到结果未知, 码 {code}", f"⚠️ 请人工确认: {result.message}")
+
+    def _safe_notify(self, reason: str, text: str) -> None:
+        """Best-effort notification that can never fail the sign-in worker."""
+        try:
+            self.notify(reason, text)
+        except Exception as exc:
+            # Notifications are auxiliary (for example, WeChat may be
+            # unavailable).  Preserve the actual browser/result flow and keep
+            # a local diagnostic for operators.
+            print(f"[warn] 签到通知失败：{type(exc).__name__}")
 
 
 class _BrowserSession:
@@ -296,7 +368,7 @@ class _BrowserSession:
     have stdin/stdout. The parent remains able to stop the entire child tree.
     """
 
-    def __init__(self, stop: threading.Event, timeout_s: float):
+    def __init__(self, stop: threading.Event, timeout_s: float, *, on_verification=None):
         self.stop = stop
         self.timeout_s = timeout_s
         self.resources = ExitStack()
@@ -304,17 +376,20 @@ class _BrowserSession:
         self.proc = None
         self.sequence = 0
         self.in_request = False
+        self.on_verification = on_verification
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def _wait(self, path: Path) -> None:
+    def _wait(self, path: Path, *, progress=None) -> None:
         deadline = time.monotonic() + self.timeout_s
         while not path.exists():
             if self.stop.is_set():
                 raise InterruptedError("监控已停止")
             if self.proc.poll() is not None:
                 raise RuntimeError("浏览器进程已退出")
+            if progress is not None:
+                progress()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("prepared browser", self.timeout_s)
@@ -344,27 +419,50 @@ class _BrowserSession:
         self.sequence += 1
         request = self.sequence
         self.in_request = True
-        # Never replace a file the Windows child may still have open for reading.
-        # Immutable request names also prevent reprocessing an earlier code.
-        write_json(self.directory / f"request-{request}.json", {
-            "id": request, "code": code, "detected_at": detected_at})
-        result_path = self.directory / f"result-{request}.json"
-        self._wait(result_path)
-        result = SignResult.read(result_path, code)
-        self.in_request = False
-        if result.status == "success" and self.proc.poll() not in (None, 0):
-            return SignResult("unknown", code, "浏览器异常退出，签到结果需到平台核对")
-        timing = self.directory / f"timing-{request}.json"
+        request_finished = False
         try:
-            if timing.exists():
-                values = json.loads(timing.read_text(encoding="utf-8"))
-                if "page_ready" in values and "submit" in values:
-                    ready_s = max(0.0, values["page_ready"] - detected_at)
-                    submit_s = max(0.0, values["submit"] - detected_at)
-                    print(f"[autosign] 确认码→页面就绪 {ready_s:.2f}s，确认码→点击签到 {submit_s:.2f}s")
-        except (OSError, ValueError, TypeError):
-            print("[warn] 无法读取操作耗时；签到结果已单独确认")
-        return result
+            # Never replace a file the Windows child may still have open for reading.
+            # Immutable request names also prevent reprocessing an earlier code.
+            write_json(self.directory / f"request-{request}.json", {
+                "id": request, "code": code, "detected_at": detected_at})
+            result_path = self.directory / f"result-{request}.json"
+            self._wait(result_path, progress=verification_progress(
+                self.directory / f"progress-{request}.json", code, self.on_verification))
+            result = SignResult.read(result_path, code)
+            # Once a well-formed result has been read, this request is complete
+            # and the prepared browser may be reused for the next code.  Any
+            # timeout, write failure, or malformed result before this point
+            # leaves the child in an unknown state and must abort it immediately.
+            request_finished = True
+            if result.status == "success" and self.proc.poll() not in (None, 0):
+                return SignResult("unknown", code, "浏览器异常退出，签到结果需到平台核对")
+            timing = self.directory / f"timing-{request}.json"
+            try:
+                if timing.exists():
+                    values = json.loads(timing.read_text(encoding="utf-8"))
+                    if "page_ready" in values and "submit" in values:
+                        ready_s = max(0.0, values["page_ready"] - detected_at)
+                        submit_s = max(0.0, values["submit"] - detected_at)
+                        print(f"[autosign] 确认码→页面就绪 {ready_s:.2f}s，确认码→点击签到 {submit_s:.2f}s")
+            except (OSError, ValueError, TypeError):
+                print("[warn] 无法读取操作耗时；签到结果已单独确认")
+            return result
+        finally:
+            if request_finished or self.proc is None:
+                self.in_request = False
+            else:
+                try:
+                    if self.proc.poll() is None:
+                        # Do not let close() take its 1.5s graceful-stop path
+                        # after a failed request: the browser may still be
+                        # submitting it.
+                        AutoSigner._terminate_child(self.proc)
+                except Exception as exc:
+                    print(f"[warn] 失败签到浏览器清理异常：{exc}")
+                    # Keep the in-flight marker so close() also takes the
+                    # immediate termination path if cleanup itself failed.
+                else:
+                    self.in_request = False
 
     def close(self) -> None:
         try:
@@ -384,13 +482,28 @@ class _BrowserSession:
 
 
 def make_auto_signer(cfg: dict, alerter, stop: threading.Event | None = None):
-    if not (cfg.get("auto_sign") or {}).get("enabled"):
+    options = cfg.get("auto_sign") or {}
+    if not isinstance(options, dict) or not options.get("enabled"):
         return None
 
     def notify(reason: str, text: str):
         print(f"!!!! {reason} !!!!")
         alerter.notify(text, "code", reason)
 
-    options = cfg.get("auto_sign") or {}
-    return AutoSigner(notify, int(options.get("timeout_seconds", 180)), stop,
+    timeout = _timeout_seconds(options.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+    return AutoSigner(notify, timeout, stop,
                       prewarm_browser=bool(options.get("prewarm_browser", True)))
+
+
+def _timeout_seconds(value: object) -> int:
+    """Return a bounded timeout, falling back for malformed config values."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        timeout = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_TIMEOUT_SECONDS
+    if (not math.isfinite(timeout)
+            or not MIN_TIMEOUT_SECONDS <= timeout <= MAX_TIMEOUT_SECONDS):
+        return DEFAULT_TIMEOUT_SECONDS
+    return int(timeout)
